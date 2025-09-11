@@ -1,6 +1,4 @@
-// E:\Hairdresser_matching_service\backend\index.js
 const express = require('express');
-const mysql = require('mysql2/promise');
 require('dotenv').config({ path: '.env.local' });
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
@@ -13,23 +11,28 @@ const stripe = require('stripe')(stripeSecretKey);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
+    return next();
 });
 
-app.get('/hello', (req, res) => {
-    res.send('Hello from Express!');
-});
+// Stripe webhook must receive raw body BEFORE JSON parser
+app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
 
-app.post('/create-payment-session', async (req, res) => {
+// JSON parser for all other routes
+app.use(express.json());
+
+// Health
+app.get('/hello', (req, res) => res.send('Hello from Express!'));
+
+// Simple demo checkout (kept)
+app.post('/create-payment-session', async(req, res) => {
     try {
         const { amount, currency, description } = req.body;
-
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
@@ -44,7 +47,6 @@ app.post('/create-payment-session', async (req, res) => {
             success_url: 'http://localhost:5173/success.html',
             cancel_url: 'http://localhost:5173/main.html',
         });
-
         res.json({ url: session.url });
     } catch (error) {
         console.error('Stripe error:', error);
@@ -52,112 +54,17 @@ app.post('/create-payment-session', async (req, res) => {
     }
 });
 
-const { sendMessage } = require('./services/lineService');
+// Routers
+app.use('/', require('./routes/health'));
+app.use('/api', require('./routes/users'));
+app.use('/api', require('./routes/requests'));
+app.use('/api', require('./routes/offers'));
+app.use('/api', require('./routes/matchings'));
+app.use('/api', require('./routes/chat'));
+app.use('/api', require('./routes/admin'));
+app.use('/api', require('./routes/stripe')); // includes /api/stripe-webhook
+app.use('/', require('./routes/line')); // /webhook and notifications
 
-app.post('/send-line-message', async (req, res) => {
-    const { userId, message } = req.body;
-    if (!userId || !message) {
-        return res.status(400).json({ error: 'userId and message are required' });
-    }
-
-    await sendMessage(userId, message);
-    res.json({ success: true });
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
-
-//  async function to start app
-async function startServer() {
-    try {
-        const db = await mysql.createConnection({
-            host: 'localhost',
-            user: 'root',
-            password: '',
-            database: 'salomo',
-        });
-
-        console.log('MySQL connected!');
-
-        // POST /api/request - 施術希望を保存
-        app.post('/api/request', async (req, res) => {
-            try {
-                const { menu, date, time, price, condition, note } = req.body;
-
-                const query = `
-                    INSERT INTO service_requests (menu, date, time, price, \`condition\`, note)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                `;
-                await db.execute(query, [
-                    menu, date, time, price, condition || '', note || ''
-                ]);
-
-                res.status(200).json({ message: '施術希望が保存されました' });
-
-            } catch (err) {
-                console.error('DB Insert Error:', err);
-                res.status(500).json({ error: 'Failed to submit request' });
-            }
-        });
-
-        app.get('/api/requests', async (req, res) => {
-            try {
-                const [rows] = await db.execute('SELECT * FROM service_requests ORDER BY id DESC');
-                res.status(200).json(rows);
-            } catch (err) {
-                console.error('DB Select Error:', err);
-                res.status(500).json({ error: 'Failed to fetch requests' });
-            }
-        });
-
-
-        app.post('/api/save-user', async (req, res) => {
-            const { line_user_id, name, avatar_url, status_message } = req.body;
-
-            if (!line_user_id || !name) {
-                return res.status(400).json({ error: 'Missing required fields' });
-            }
-
-            try {
-                const [existing] = await db.execute(
-                    'SELECT id FROM users WHERE line_user_id = ?', [line_user_id]
-                );
-
-                if (existing.length > 0) {
-                    await db.execute(
-                        'UPDATE users SET name = ?, avatar_url = ?, status_message = ? WHERE line_user_id = ?', [name, avatar_url, status_message, line_user_id]
-                    );
-                } else {
-                    await db.execute(
-                        'INSERT INTO users (line_user_id, name, avatar_url, status_message) VALUES (?, ?, ?, ?)', [line_user_id, name, avatar_url, status_message]
-                    );
-                }
-
-                res.status(200).json({ message: 'User saved successfully' });
-            } catch (err) {
-                console.error('Failed to save user:', err);
-                res.status(500).json({ error: 'Database error' });
-            }
-        });
-
-
-
-        // GET /api/suggestions - スタイリスト一覧を返す
-        app.get('/api/suggestions', async (req, res) => {
-            try {
-                const [rows] = await db.query(`
-                    SELECT name, avatar_url, rating FROM stylists ORDER BY rating DESC
-                `);
-                res.status(200).json(rows);
-            } catch (err) {
-                console.error('DB Select Error:', err);
-                res.status(500).json({ error: 'Failed to fetch suggestions' });
-            }
-        });
-
-        app.listen(PORT, () => {
-            console.log(`Server is running on http://localhost:${PORT}`);
-        });
-    } catch (err) {
-        console.error('MySQL connection failed:', err);
-    }
-}
-
-startServer();
